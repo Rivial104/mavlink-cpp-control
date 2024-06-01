@@ -1,0 +1,61 @@
+#include <Arduino.h>
+#include <mavlink.h>
+
+#define SERIAL_BAUD 57600
+#define MAVLINK_SYSTEM_ID 1
+#define MAVLINK_COMPONENT_ID 1
+
+HardwareSerial &mavSerial = Serial1;
+
+void setup() {
+  Serial.begin(115200);
+  mavSerial.begin(SERIAL_BAUD);
+}
+
+void loop() {
+  // Set mode to GUIDED
+  setMode(4);
+  delay(1000);
+
+  // Arm the drone
+  armDrone(true);
+  delay(3000);
+
+  // Set altitude to 10 meters
+  setAltitude(10.0);
+  delay(5000);
+
+  // Land the drone
+  setMode(9); // Mode 9 is typically RTL (Return to Launch) or you can use 6 for LAND
+  delay(10000);
+
+  // Disarm the drone after landing
+  armDrone(false);
+  while (true); // Stop execution
+}
+
+void setMode(uint8_t mode) {
+  mavlink_message_t msg;
+  mavlink_msg_set_mode_pack(MAVLINK_SYSTEM_ID, MAVLINK_COMPONENT_ID, &msg, MAVLINK_SYSTEM_ID, MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, mode);
+  sendMavlinkMessage(msg);
+}
+
+void armDrone(bool arm) {
+  mavlink_message_t msg;
+  uint8_t armCmd = arm ? 1 : 0;
+  mavlink_msg_command_long_pack(MAVLINK_SYSTEM_ID, MAVLINK_COMPONENT_ID, &msg, 1, MAVLINK_COMPONENT_ID, MAV_CMD_COMPONENT_ARM_DISARM, 0, armCmd, 0, 0, 0, 0, 0, 0);
+  sendMavlinkMessage(msg);
+}
+
+void setAltitude(float altitude) {
+  mavlink_message_t msg;
+  mavlink_msg_set_position_target_global_int_pack(MAVLINK_SYSTEM_ID, MAVLINK_COMPONENT_ID, &msg, millis(), MAVLINK_SYSTEM_ID, MAVLINK_COMPONENT_ID, MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                                                   0b0000111111111000, 0, 0, altitude * 1000, 0, 0, 0, 0, 0, 0, 0, 0);
+  sendMavlinkMessage(msg);
+}
+
+void sendMavlinkMessage(const mavlink_message_t &msg) {
+  uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+  uint16_t len = mavlink_msg_to_send_buffer(buf, &msg);
+  mavSerial.write(buf, len);
+}

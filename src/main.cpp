@@ -467,10 +467,10 @@ void readFromRaspi() {
         Command cmd;
         memcpy(&cmd, buffer, sizeof(Command));
 
-        // Konwersja z Big Endian do Little Endian jeśli potrzebne
-        cmd.param1 = reverseFloat(cmd.param1);
-        cmd.param2 = reverseFloat(cmd.param2);
-        cmd.param3 = reverseFloat(cmd.param3);
+        // // Konwersja z Big Endian do Little Endian jeśli potrzebne
+        // cmd.param1 = reverseFloat(cmd.param1);
+        // cmd.param2 = reverseFloat(cmd.param2);
+        // cmd.param3 = reverseFloat(cmd.param3);
 
         switch (cmd.type[0]) {
           case 'D': // DST

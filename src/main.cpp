@@ -20,10 +20,14 @@ void automat();
 void testAutomat();
 void ascendToAltitude(float target_altitude, float climb_rate);
 
+// Obsluga komunikacji z Raspi
+void readFromRaspi();
+float reverseFloat(const float inFloat);
+
 // Reszta funkcji
 void clearSerialBuffer();
-void readFromRaspi();
 void convertLocalToGPS(double lat, double lon, double x, double y, double& new_lat, double& new_lon); 
+void eulerToQuaternion(float roll, float pitch, float yaw, float quaternion[4]);
 
 
 // Deklaracja pinów portów szeregowych
@@ -31,7 +35,7 @@ HardwareSerial mavlinkSerial(PA3, PA2); // RX TX
 HardwareSerial Serial3(PB7, PB6); // RX TX
 
 unsigned long int previousMillis = 0L;
-unsigned long int INTERVAL = 1000L;
+unsigned long int INTERVAL = 10L;
 unsigned long modeChangeMillis = 0L;
 const unsigned long MODE_CHANGE_INTERVAL = 10000L; // 10 seconds
 
@@ -63,6 +67,15 @@ double current_lon = 0.0;
 #define MAVLINK_MSG_SET_ATTITUDE_TARGET_IGNORE_YAW_RATE 0x04
 #define MAVLINK_MSG_SET_ATTITUDE_TARGET_IGNORE_THRUST 0x08
 
+// Definicja struktury danych od Raspi
+struct Command {
+  char type[3];
+  float param1;
+  float param2;
+  float param3;
+  uint8_t checksum;
+};
+
 void setup() {
   Serial.begin(57600);
   mavlinkSerial.begin(57600);
@@ -89,6 +102,8 @@ void loop() {
 
       MavRequestData();
       receiveMavlink();
+
+      readFromRaspi();
   }
 }
 
@@ -145,7 +160,7 @@ void armMotors(bool arm) {
 
   uint16_t len = mavlink_msg_to_send_buffer(buf, &msg);
   mavlinkSerial.write(buf, len);
-  Serial.println("Motors armed");
+  Serial.println(arm ? "Motors armed" : "Motors disarmed");
 }
 
 void setAltitude(float altitude) {
@@ -178,13 +193,13 @@ void setMotorSpeed(int motor_id, int speed) {
   Serial.println(speed);
 }
 
-void flyToGPS(double lat, double lon, float alt, float stayTime) {
+void flyToGPS(double lat, double lon, float alt) {
   mavlink_message_t msg;
   uint8_t buf[MAVLINK_MAX_PACKET_LEN];
 
   // Ustawienie waypoint
   mavlink_msg_command_long_pack(sysid, compid, &msg, target_system, target_component,
-                                MAV_CMD_NAV_WAYPOINT, stayTime, 0, 0, 0, 0, lat, lon, alt);
+                                MAV_CMD_NAV_WAYPOINT, 0, 0, 0, 0, 0, lat, lon, alt);
 
   uint16_t len = mavlink_msg_to_send_buffer(buf, &msg);
   mavlinkSerial.write(buf, len);
@@ -211,7 +226,7 @@ void setYaw(float yaw_angle) {
 
   // Kąty w radianach
   float q[4];
-  mavlink_euler_to_quaternion(0, 0, yaw, q);
+  eulerToQuaternion(0, 0, yaw, q);
 
   // Wysyłanie wiadomości MAVLink SET_ATTITUDE_TARGET
   mavlink_msg_set_attitude_target_pack(sysid, compid, &msg, millis() / 1000, target_system, target_component, type_mask, q, 0, 0, 0, 0);
@@ -221,7 +236,7 @@ void setYaw(float yaw_angle) {
   Serial.println(yaw_angle);
 }
 
-void mavlink_euler_to_quaternion(float roll, float pitch, float yaw, float quaternion[4]) {
+void eulerToQuaternion(float roll, float pitch, float yaw, float quaternion[4]) {
   float cosRoll = cos(roll * 0.5);
   float sinRoll = sin(roll * 0.5);
   float cosPitch = cos(pitch * 0.5);
@@ -233,6 +248,25 @@ void mavlink_euler_to_quaternion(float roll, float pitch, float yaw, float quate
   quaternion[1] = sinRoll * cosPitch * cosYaw - cosRoll * sinPitch * sinYaw;
   quaternion[2] = cosRoll * sinPitch * cosYaw + sinRoll * cosPitch * sinYaw;
   quaternion[3] = cosRoll * cosPitch * sinYaw - sinRoll * sinPitch * cosYaw;
+}
+
+void precisionLand(double lat, double lon, float alt) {
+  mavlink_message_t msg;
+  uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+
+  // Komenda do lądowania w aktualnych współrzędnych GPS z precyzyjnym lądowaniem
+  mavlink_msg_command_long_pack(sysid, compid, &msg, target_system, target_component,
+                                MAV_CMD_NAV_LAND, 0, 0, 1, NAN, NAN, lat, lon, alt);
+
+  uint16_t len = mavlink_msg_to_send_buffer(buf, &msg);
+  mavlinkSerial.write(buf, len);
+
+  Serial.print("Landing at Latitude: ");
+  Serial.print(lat, 8);
+  Serial.print(" Longitude: ");
+  Serial.print(lon, 8);
+  Serial.print(" Altitude: ");
+  Serial.println(alt, 2);
 }
 
 //######################################################################//
@@ -390,15 +424,15 @@ void handleMessage(mavlink_message_t* msg) {
     case 33: { // MAVLINK_MSG_ID_GLOBAL_POSITION_INT
         mavlink_global_position_int_t global_position;
         mavlink_msg_global_position_int_decode(msg, &global_position);
-        // Przekonwertowane na readable
-        // float lat = global_position.lat/10000000; // Wartość w milimetrach
-        // float lon = global_position.lon/10000000;  // Wartość w milimetrach
-        float lat = global_position.lat; // Wartość w milimetrach
-        float lon = global_position.lon;  // Wartość w milimetrach
+        float current_lat = global_position.lat; // Wartość w milimetrach
+        float current_lon = global_position.lon;  // Wartość w milimetrach
+        // Przekonwertowane na readable        
+        float convLat = current_lat/10000000;
+        float convLon = current_lon/10000000;
         Serial.print("Latitude: ");
-        Serial.println(lat);
+        Serial.println(convLat);
         Serial.print("Longitude: ");
-        Serial.println(lon);
+        Serial.println(convLon);
       }
       break;
   }
@@ -420,60 +454,91 @@ void sendHeartbeat() {
 //######################################################################//
 
 void readFromRaspi() {
-  if (Serial3.available() > 0) {
-    String command = Serial3.readStringUntil('@');
-    String commandType = command.substring(0, 3);
-    String parameters = command.substring(4);
+  static uint8_t buffer[sizeof(Command) + 1]; // +1 na znak '@'
+  static size_t buffer_index = 0;
 
-    switch (commandType[0]) {
-      case 'D': // DST
-        {
-          float x, y, z;
-          sscanf(parameters.c_str(), "%f, %f, %f", &x, &y, &z);
-          double new_lat, new_lon;
-          convertLocalToGPS(current_lat, current_lon, x, y, new_lat, new_lon);
-          setAltitude(z); // Ustaw wysokość
-          // Można dodać więcej kodu do nawigacji GPS
-          // np. flyToGPS(new_lat, new_lon, z);
-        }
-        break;
-      
-      case 'V': // VEL
-        {
-          float vx, vy, vz;
-          sscanf(parameters.c_str(), "%f, %f, %f", &vx, &vy, &vz);
-          setSpeed(vx, vy, vz);
-        }
-        break;
-      
-      case 'R': // ROT
-        {
-          float yaw_angle;
-          sscanf(parameters.c_str(), "%f", &yaw_angle);
-          setYaw(yaw_angle);
-        }
-        break;
-      
-      case 'L': // LND
-        {
-          mavSetMode(6); // Change flightmode to LAND
-        }
-        break;
-      
-      case 'S': // STR
-        {
-          armMotors(true);
-        }
-        break;
+  while (Serial3.available() > 0) {
+    char c = Serial3.read();
+    buffer[buffer_index++] = c;
 
-      default:
-        Serial3.print("UNK@");
-        break;
+    // Sprawdź, czy doszliśmy do końca komendy (znak '@')
+    if (c == '@') {
+      if (buffer_index == sizeof(Command) + 1) {
+        Command cmd;
+        memcpy(&cmd, buffer, sizeof(Command));
+
+        // Konwersja z Big Endian do Little Endian jeśli potrzebne
+        cmd.param1 = reverseFloat(cmd.param1);
+        cmd.param2 = reverseFloat(cmd.param2);
+        cmd.param3 = reverseFloat(cmd.param3);
+
+        switch (cmd.type[0]) {
+          case 'D': // DST
+            {
+              double new_lat, new_lon;
+              convertLocalToGPS(current_lat, current_lon, cmd.param1, cmd.param2, new_lat, new_lon);
+              flyToGPS(new_lat, new_lon, cmd.param3); // Użyj przekonwertowanych współrzędnych GPS
+            }
+            break;
+          
+          case 'V': // VEL
+            {
+              setSpeed(cmd.param1, cmd.param2, cmd.param3);
+            }
+            break;
+          
+          case 'R': // ROT
+            {
+              setYaw(cmd.param1);
+            }
+            break;
+          
+          case 'L': // LND
+            {
+              precisionLand(current_lat, current_lon, 0.0); // Lądowanie w aktualnych współrzędnych GPS
+            }
+            break;
+          
+          case 'S': // STR
+            {
+              armMotors(true);
+            }
+            break;
+
+          default:
+            Serial3.print("UNK@");
+            break;
+        }
+
+        // Sending ACK to confirm command reception
+        Serial3.print("ACK@");
+      } else {
+        Serial3.print("ERR@");
+      }
+
+      // Zresetuj bufor
+      buffer_index = 0;
     }
 
-    // Sending ACK to confirm command reception
-    Serial3.print("ACK@");
+    // Ochrona przed przepełnieniem bufora
+    if (buffer_index >= sizeof(Command) + 1) {
+      buffer_index = 0;
+    }
   }
+}
+
+float reverseFloat(const float inFloat) {
+  float retVal;
+  char *floatToConvert = (char*)&inFloat;
+  char *returnFloat = (char*)&retVal;
+
+  // Reverse the byte order
+  returnFloat[0] = floatToConvert[3];
+  returnFloat[1] = floatToConvert[2];
+  returnFloat[2] = floatToConvert[1];
+  returnFloat[3] = floatToConvert[0];
+
+  return retVal;
 }
 
 //######################################################################//
@@ -484,38 +549,6 @@ void clearSerialBuffer() {
   while (mavlinkSerial.available() > 0) {
     mavlinkSerial.read();
   }
-}
-
-void readFromRaspi(){
-
-  if (Serial3.available()) {
-          String dataFromSerial3 = Serial3.readStringUntil('\n');
-          Serial.print("Odebrano na Serial3: ");
-          Serial.println(dataFromSerial3);
-
-          if (dataFromSerial3 == "arm") {
-                armMotors(1);
-          }
-
-          if (dataFromSerial3 == "darm") {
-                armMotors(0);
-          }
-
-          if (dataFromSerial3 == "flt4") {
-                mavSetMode(4);
-          }
-
-          if (dataFromSerial3 == "flt0") {
-                mavSetMode(0);
-          }
-
-          if (dataFromSerial3 == "land") {
-                mavSetMode(6);
-          }
-
-          // Wysłanie danych z powrotem na Serial2
-          Serial3.println(dataFromSerial3);
-      }
 }
 
 void convertLocalToGPS(double lat, double lon, double x, double y, double& new_lat, double& new_lon) {

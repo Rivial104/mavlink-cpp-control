@@ -1,9 +1,21 @@
 #include <Arduino.h>
 #include <common/mavlink.h>
+// #include <cmath>
+
+// Definicja struktury danych od Raspi
+struct Command {
+  char type[3];
+  float param1;
+  float param2;
+  float param3;
+  uint8_t checksum;
+};
 
 // Obsluga mavlink
 void MavRequestData();
 void sendHeartbeat();
+void sendCommandLong(uint16_t command, float param1, float param2, float param3, float param4, float param5, float param6, float param7);
+void sendMavlinkMessage(mavlink_message_t* msg); 
 void handleMessage(mavlink_message_t* msg);
 void receiveMavlink();
 
@@ -13,31 +25,38 @@ void armMotors(bool arm);
 void setAltitude(float altitude);
 void setMotorSpeed(int motor_id, int speed);
 void setSpeed(float vx, float vy, float vz);
-// void setYaw(float yaw_angle);
+void setYaw(float yaw_angle);
+void takeoff(float alt);
+void takeoffWithLoiter(float alt);
+void mavDelay(int seconds);
+void flyToGPS(double lat, double lon, float alt);
+void reposition(double lat, double lon, float alt);
 
 // Loty automatyczne i testy
 void automat();
 void testAutomat();
 void ascendToAltitude(float target_altitude, float climb_rate);
+void test1();
+void armAndTakeoff(float target_altitude);
 
 // Obsluga komunikacji z Raspi
 void readFromRaspi();
 float reverseFloat(const float inFloat);
+void convertCommand(Command &cmd);
 
 // Reszta funkcji
 void clearSerialBuffer();
 void convertLocalToGPS(double lat, double lon, double x, double y, double& new_lat, double& new_lon); 
 void eulerToQuaternion(float roll, float pitch, float yaw, float quaternion[4]);
-
+double radToDeg(double radians);
+double convertYaw(double angle);
 
 // Deklaracja pinów portów szeregowych
 HardwareSerial mavlinkSerial(PA3, PA2); // RX TX
-HardwareSerial Serial3(PB7, PB6); // RX TX
+HardwareSerial raspiSerial(PB7, PB6); // RX TX || WHITE YELLOW
 
 unsigned long int previousMillis = 0L;
-unsigned long int INTERVAL = 10L;
-unsigned long modeChangeMillis = 0L;
-const unsigned long MODE_CHANGE_INTERVAL = 10000L; // 10 seconds
+unsigned long int INTERVAL = 1000L;
 
 // Konfiguracja MAVLINK
 uint8_t system_type = MAV_TYPE_GENERIC;
@@ -60,6 +79,10 @@ float yaw = 0.0;
 const double EARTH_RADIUS = 6378137.0; 
 double current_lat = 0.0; 
 double current_lon = 0.0; 
+bool missionState;
+
+// const double PI = 3.14159265358979323846;
+#define PI 3.1415926535897932384626433832795
 
 // Definicje masek
 #define MAVLINK_MSG_SET_ATTITUDE_TARGET_IGNORE_ROLL_RATE 0x01
@@ -67,46 +90,62 @@ double current_lon = 0.0;
 #define MAVLINK_MSG_SET_ATTITUDE_TARGET_IGNORE_YAW_RATE 0x04
 #define MAVLINK_MSG_SET_ATTITUDE_TARGET_IGNORE_THRUST 0x08
 
-// Definicja struktury danych od Raspi
-struct Command {
-  char type[3];
-  float param1;
-  float param2;
-  float param3;
-  uint8_t checksum;
-};
-
 void setup() {
   Serial.begin(57600);
   mavlinkSerial.begin(57600);
-  Serial3.begin(57600, SERIAL_8N1);
+  raspiSerial.begin(57600, SERIAL_8N1);
 
   pinMode(PC13, OUTPUT);
   clearSerialBuffer();
-  delay(5000);
+  mavSetMode(0);
+  delay(10000);
 }
 
 void loop() {
+    static bool test1Initiated = false;
+     bool missionState = true;
 
-  mavSetMode(0);
-  unsigned long currentMillis = millis();
-  if (currentMillis - previousMillis >= INTERVAL) {
-    previousMillis = currentMillis;
+    while(missionState){
+      unsigned long currentMillis = millis();
+      if (currentMillis - previousMillis >= INTERVAL) {
+        previousMillis = currentMillis;
+        
+        Serial.println(raspiSerial.available());
 
+        // Samoczynne podlecenie drona po uruchomieniu zasilania
+        // if (!test1Initiated) {
+        //     armAndTakeoff(5.0);
+        //     test1Initiated = true;
+        //     mavDelay(1000);
+        // }
 
+        // MavRequestData();
+        // receiveMavlink();
+
+        // armAndTakeoff(5);
+        // readFromRaspi();
+
+      // Serial.println(raspiSerial.available());
     
-    // ascendToAltitude(6.0, 1.0); // Wznoś się na wysokość 10 metrów z prędkością 1 
+      // Po otrzymaniu komendy 'FIN' 
+      // missionState = false;
+      // }
+      // armAndTakeoff(5.0);
 
-    // automat();
-    testAutomat();
+      // mavSetMode(4);
+      // armMotors(1);
+      // reposition(current_lat,current_lon,2);  
+      // delay(4000);
+      // reposition(current_lat,current_lon,0);    
+      // reposition(current_lat,current_lon,0);    
+      test1();
+  
+      // test1();
 
-      MavRequestData();
-      receiveMavlink();
-
-      readFromRaspi();
-  }
+    }
+    // mavSetMode(6);
 }
-
+}
 
 //######################################################################//
 //                PODSTAWOWE FUNKCJE DO STEROWANIA DRONEM
@@ -140,7 +179,39 @@ void setSpeed(float vx, float vy, float vz) {
   mavlinkSerial.write(buf, len);
 }
 
+void reposition(double lat, double lon, float alt){
+  mavlink_message_t msg;
+  uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+
+  mavlink_msg_command_long_pack(
+  sysid, compid, &msg, target_system, target_component, MAV_CMD_DO_REPOSITION, 0, -1, 0, 0, 0, lat, lon, alt);
+
+  uint16_t len = mavlink_msg_to_send_buffer(buf, &msg);
+  mavlinkSerial.write(buf, len);
+  Serial.println("Delay");
+}
+
+void mavDelay(int seconds){
+  mavlink_message_t msg;
+  uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+
+  mavlink_msg_command_long_pack(
+  sysid, compid, &msg, target_system, target_component, MAV_CMD_NAV_DELAY, 0, 0, 0, 0, seconds, 0, 0, 0);
+
+  uint16_t len = mavlink_msg_to_send_buffer(buf, &msg);
+  mavlinkSerial.write(buf, len);
+  Serial.println("Delay");
+}
+
 void mavSetMode(int flightMode) {
+
+  // TRYBY LOTU //
+  // 0 -> Stabilize
+  // 2 -> Acro
+  // 4 -> Guided
+  // 5 -> Loiter
+  // 6 -> RTL
+
   mavlink_message_t msg;
   uint8_t buf[MAVLINK_MAX_PACKET_LEN];
 
@@ -212,6 +283,30 @@ void flyToGPS(double lat, double lon, float alt) {
   Serial.println(alt, 2);
 }
 
+void takeoff(float alt){
+  mavlink_message_t msg;
+  uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+
+  // Ustawienie waypoint
+  mavlink_msg_command_long_pack(sysid, compid, &msg, target_system, target_component,
+                                MAV_CMD_NAV_TAKEOFF, 0, 0, 0, 0, 0, 0, 0, alt);
+
+  uint16_t len = mavlink_msg_to_send_buffer(buf, &msg);
+  mavlinkSerial.write(buf, len);
+}
+
+void takeoffWithLoiter(float alt){
+  mavlink_message_t msg;
+  uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+
+  // Ustawienie waypoint
+  mavlink_msg_command_long_pack(sysid, compid, &msg, target_system, target_component,
+                                MAV_CMD_NAV_LOITER_TO_ALT, 0, 1, 0, 0, 0, 0, 0, alt);
+
+  uint16_t len = mavlink_msg_to_send_buffer(buf, &msg);
+  mavlinkSerial.write(buf, len);
+}
+
 void setYaw(float yaw_angle) {
   mavlink_message_t msg;
   uint8_t buf[MAVLINK_MAX_PACKET_LEN];
@@ -234,20 +329,6 @@ void setYaw(float yaw_angle) {
   mavlinkSerial.write(buf, len);
   Serial.print("Yaw angle set to: ");
   Serial.println(yaw_angle);
-}
-
-void eulerToQuaternion(float roll, float pitch, float yaw, float quaternion[4]) {
-  float cosRoll = cos(roll * 0.5);
-  float sinRoll = sin(roll * 0.5);
-  float cosPitch = cos(pitch * 0.5);
-  float sinPitch = sin(pitch * 0.5);
-  float cosYaw = cos(yaw * 0.5);
-  float sinYaw = sin(yaw * 0.5);
-
-  quaternion[0] = cosRoll * cosPitch * cosYaw + sinRoll * sinPitch * sinYaw;
-  quaternion[1] = sinRoll * cosPitch * cosYaw - cosRoll * sinPitch * sinYaw;
-  quaternion[2] = cosRoll * sinPitch * cosYaw + sinRoll * cosPitch * sinYaw;
-  quaternion[3] = cosRoll * cosPitch * sinYaw - sinRoll * sinPitch * cosYaw;
 }
 
 void precisionLand(double lat, double lon, float alt) {
@@ -273,66 +354,113 @@ void precisionLand(double lat, double lon, float alt) {
 //                          AUTOMATYCZNY LOT I TESTY
 //######################################################################//
 
-void testAutomat() {
-  // Ustaw tryb Loiter (np. mode 5)
+void armAndTakeoff(float target_altitude) {
+
+  armMotors(1);
   mavSetMode(4);
-  delay(1000);
 
-  // Uzbrój drona
-  armMotors(true);
-  delay(1000);
-
-  // // Przyspiesz silniki do wartości 1400 PWM (zakładając zakres 1000-2000)
   // for (int i = 1; i <= 4; ++i) {
   //   setMotorSpeed(i, 1200); // 1400 to przykład 20% zakresu PWM
   // }
-  // delay(1000);
-
+  // // mavDelay(2);
+  // delay(2000);
   // for (int i = 1; i <= 4; ++i) {
   //   setMotorSpeed(i, 1300); // 1400 to przykład 20% zakresu PWM
   // }
-  // delay(1000);
-
+  // // mavDelay(2);
+  // delay(2000);
   // for (int i = 1; i <= 4; ++i) {
   //   setMotorSpeed(i, 1400); // 1400 to przykład 20% zakresu PWM
   // }
-  // delay(1000);
+  // // mavDelay(2);
+  // delay(2000);
 
-  // Ustaw wysokość na 10 metrów
-  setAltitude(10.0);
-  delay(5000); // Poczekaj na osiągnięcie wysokości
+  setSpeed(0,0,0.5);
+  mavDelay(2);
 
-  // ascendToAltitude(10.0,2.0);
-  // delay(4000);
+  flyToGPS(current_lat, current_lon, 3);
+   mavSetMode(3);
 
-  // // Ustaw wysokość na 15 metrów
-  // setAltitude(15.0);
-  // delay(5000); // Poczekaj na osiągnięcie wysokości
+  // mavDelay(5);
+  delay(2000);
 
-  // Włącz tryb RTL lub Land (np. mode 6)
-  mavSetMode(6);
-  delay(15000);
+  flyToGPS(current_lat, current_lon, 2);
+  // mavDelay(5);
+  delay(4000);
 
-  // Rozbrój drona po lądowaniu
-  armMotors(false);
+
+  mavSetMode(9);
+  delay(5000);
+
+  mavSetMode(4);
 }
 
-void automat() {
-  mavSetMode(4); // Mav mode guided disarmed
-  delay(1000);
 
+void test1() {
   armMotors(1);
-  delay(1000);
+  mavSetMode(5);
 
-  // Set motor speeds to 20% (assuming PWM range is 1000-2000)
-  for (int i = 1; i <= 3; ++i) {
-    setMotorSpeed(i, 1400); // 1200 is 20% of the 1000-2000 range
+  for (int i = 1; i <= 4; ++i) {
+    setMotorSpeed(i, 1200); // 1400 to przykład 20% zakresu PWM
+  }
+  // mavDelay(2);
+  delay(2000);
+  for (int i = 1; i <= 4; ++i) {
+    setMotorSpeed(i, 1400); // 1400 to przykład 20% zakresu PWM
+  }
+  // mavDelay(2);
+  delay(2000);
+
+  for (int i = 1; i <= 4; ++i) {
+    setMotorSpeed(i, 1500); // 1400 to przykład 20% zakresu PWM
   }
   delay(2000);
 
+
+  setSpeed(0,0,-1);
+  delay(2000);
+  mavSetMode(2);
+}
+
+void testAutomat() {
+  // Ustaw tryb Loiter (np. mode 5)
+  mavSetMode(4);
+
+  setSpeed(1.0,0,0);
+  delay(1000);
+  setSpeed(-1,0,0);
+  delay(1000);
+
+
+  mavSetMode(9);
+}
+
+void automat() {
+
+  armMotors(1);
+  delay(100);
+
+  mavSetMode(5); // Mav mode loiter 
+  delay(100);
+
+  // Set motor speeds to 20% (assuming PWM range is 1000-2000)
+  for (int i = 1; i <= 3; ++i) {
+    setMotorSpeed(i, 1200); // 1200 is 20% of the 1000-2000 range
+  }
+  delay(3000);
+
+    // Set motor speeds to 20% (assuming PWM range is 1000-2000)
+  for (int i = 1; i <= 3; ++i) {
+    setMotorSpeed(i, 1400); // 1200 is 20% of the 1000-2000 range
+  }
+  delay(3000);
+
+  setAltitude(4.0);
+  delay(10000);
+
   // Land the drone
   mavSetMode(6); // Mode 9 is typically RTL (Return to Launch) or you can use 6 for LAND
-  delay(2000);
+  delay(10000);
 
   // Disarm the drone after landing
   armMotors(0);
@@ -358,13 +486,28 @@ void MavRequestData() {
     uint8_t buf[MAVLINK_MAX_PACKET_LEN];
 
     // Żądanie wiadomości o wysokości (ID 74)
-    mavlink_msg_request_data_stream_pack(sysid, compid, &msg, target_system, target_component, MAV_DATA_STREAM_POSITION, 5, 1);
+    // Serial.println("Requesting altitude data stream...");
+    mavlink_msg_request_data_stream_pack(sysid, compid, &msg, target_system, target_component, MAV_DATA_STREAM_POSITION, 0.2, 1);
     uint16_t len = mavlink_msg_to_send_buffer(buf, &msg);
     mavlinkSerial.write(buf, len);
     delay(100); // krótka przerwa między żądaniami
 
     // Żądanie wiadomości o kątach położenia przestrzennego (ID 30, 33)
-    mavlink_msg_request_data_stream_pack(sysid, compid, &msg, target_system, target_component, MAV_DATA_STREAM_EXTRA1, 5, 1);
+    mavlink_msg_request_data_stream_pack(sysid, compid, &msg, target_system, target_component, MAV_DATA_STREAM_EXTRA1, 1, 1);
+    len = mavlink_msg_to_send_buffer(buf, &msg);
+    mavlinkSerial.write(buf, len);
+    delay(100);
+
+    // Żądanie wiadomości o statusie rozszerzonym
+    // Serial.println("Requesting extended status data stream...");
+    mavlink_msg_request_data_stream_pack(sysid, compid, &msg, target_system, target_component, MAV_DATA_STREAM_EXTENDED_STATUS, 1, 1);
+    len = mavlink_msg_to_send_buffer(buf, &msg);
+    mavlinkSerial.write(buf, len);
+    delay(100);
+
+    // Żądanie wiadomości o surowych danych sensorów
+    // Serial.println("Requesting raw sensors data stream...");
+    mavlink_msg_request_data_stream_pack(sysid, compid, &msg, target_system, target_component, MAV_DATA_STREAM_RAW_SENSORS, 1, 1);
     len = mavlink_msg_to_send_buffer(buf, &msg);
     mavlinkSerial.write(buf, len);
     delay(100);
@@ -379,7 +522,7 @@ void receiveMavlink() {
 
     if (mavlink_parse_char(MAVLINK_COMM_0, c, &msg, &status)) {
       // Sprawdź, czy wiadomość ma ID 74, 30, lub 33
-      if (msg.msgid == 74 || msg.msgid == 30 || msg.msgid == 33) {
+      if (msg.msgid == 74 || msg.msgid == 30 || msg.msgid == 33 || msg.msgid == 24) {
         Serial.print("Received message with ID: ");
         Serial.println(msg.msgid);
         handleMessage(&msg);
@@ -391,9 +534,10 @@ void receiveMavlink() {
 void handleMessage(mavlink_message_t* msg) {
   switch (msg->msgid) {
     case 74: { // MAVLINK_MSG_ID_ALTITUDE
+        // Serial.println("Handling altitude message...");
         mavlink_altitude_t altitude;
         mavlink_msg_altitude_decode(msg, &altitude);
-        float alt = altitude.altitude_local; // Wartość w metrach
+        float alt = altitude.altitude_local/1000; // Wartość w metrach
         Serial.print("Current Altitude: ");
         Serial.println(alt, 4);
       }
@@ -402,9 +546,9 @@ void handleMessage(mavlink_message_t* msg) {
     case 30: { // MAVLINK_MSG_ID_ATTITUDE
         mavlink_attitude_t attitude;
         mavlink_msg_attitude_decode(msg, &attitude);
-        float roll = attitude.roll * 10.0; // Skalowanie o 10
-        float pitch = attitude.pitch * 10.0; // Skalowanie o 10
-        float yaw = attitude.yaw * 10.0; // Skalowanie o 10
+        float roll = radToDeg(attitude.roll);// Skalowanie o 10
+        float pitch = radToDeg(attitude.pitch); // Skalowanie o 10
+        float yaw = convertYaw(radToDeg(attitude.yaw)); // Skalowanie o 10
         
         // Formatowanie i drukowanie danych
         Serial.print("Roll: ");
@@ -429,12 +573,25 @@ void handleMessage(mavlink_message_t* msg) {
         // Przekonwertowane na readable        
         float convLat = current_lat/10000000;
         float convLon = current_lon/10000000;
+        float altitude = global_position.relative_alt/1000;
         Serial.print("Latitude: ");
-        Serial.println(convLat);
+        Serial.println(convLat, 6);
         Serial.print("Longitude: ");
-        Serial.println(convLon);
+        Serial.println(convLon, 6);
+        Serial.print("Altitude: ");
+        Serial.println(altitude, 4);
       }
       break;
+
+      case 24: { // MAVLINK_MSG_ID_GPS_RAW_INT
+            // Serial.println("Handling GPS raw data message...");
+            mavlink_gps_raw_int_t gps_raw;
+            mavlink_msg_gps_raw_int_decode(msg, &gps_raw);
+            float alt = gps_raw.alt / 1000.0; // Wartość w metrach
+            Serial.print("GPS Altitude: ");
+            Serial.println(alt, 4);
+        }
+        break;
   }
 }
 
@@ -449,16 +606,44 @@ void sendHeartbeat() {
   Serial.println("Heartbeat sent");
 }
 
+void sendCommandLong(uint16_t command, float param1, float param2, float param3, float param4, float param5, float param6, float param7) {
+  mavlink_message_t msg;
+  mavlink_msg_command_long_pack(sysid, compid, &msg, target_system, target_component, command, 0, param1, param2, param3, param4, param5, param6, param7);
+  sendMavlinkMessage(&msg);
+}
+
+void sendMavlinkMessage(mavlink_message_t* msg) {
+  uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+  uint16_t len = mavlink_msg_to_send_buffer(buf, msg);
+  mavlinkSerial.write(buf, len);
+}
+
 //######################################################################//
 //                     OBSŁUGA KOMUNIKACJI Z RASPI                    
 //######################################################################//
+
+// Funkcja do konwersji bajtów na floaty
+void convertCommand(Command &cmd) {
+  cmd.param1 = reverseFloat(cmd.param1);
+  cmd.param2 = reverseFloat(cmd.param2);
+  cmd.param3 = reverseFloat(cmd.param3);
+}
+
+// Funkcja do obliczania sumy kontrolnej
+uint8_t calculateChecksum(const uint8_t *data, size_t length) {
+  uint8_t checksum = 0;
+  for (size_t i = 0; i < length; ++i) {
+    checksum ^= data[i];
+  }
+  return checksum;
+}
 
 void readFromRaspi() {
   static uint8_t buffer[sizeof(Command) + 1]; // +1 na znak '@'
   static size_t buffer_index = 0;
 
-  while (Serial3.available() > 0) {
-    char c = Serial3.read();
+  while (raspiSerial.available() > 0) {
+    char c = raspiSerial.read();
     buffer[buffer_index++] = c;
 
     // Sprawdź, czy doszliśmy do końca komendy (znak '@')
@@ -467,53 +652,71 @@ void readFromRaspi() {
         Command cmd;
         memcpy(&cmd, buffer, sizeof(Command));
 
-        // // Konwersja z Big Endian do Little Endian jeśli potrzebne
-        // cmd.param1 = reverseFloat(cmd.param1);
-        // cmd.param2 = reverseFloat(cmd.param2);
-        // cmd.param3 = reverseFloat(cmd.param3);
+        // Sprawdzenie sumy kontrolnej
+        uint8_t receivedChecksum = cmd.checksum;
+        cmd.checksum = 0; // Ustawienie na 0, aby obliczyć sumę kontrolną z danych
+        uint8_t calculatedChecksum = calculateChecksum((uint8_t*)&cmd, sizeof(Command));
 
-        switch (cmd.type[0]) {
-          case 'D': // DST
-            {
-              double new_lat, new_lon;
-              convertLocalToGPS(current_lat, current_lon, cmd.param1, cmd.param2, new_lat, new_lon);
-              flyToGPS(new_lat, new_lon, cmd.param3); // Użyj przekonwertowanych współrzędnych GPS
-            }
-            break;
-          
-          case 'V': // VEL
-            {
-              setSpeed(cmd.param1, cmd.param2, cmd.param3);
-            }
-            break;
-          
-          case 'R': // ROT
-            {
-              setYaw(cmd.param1);
-            }
-            break;
-          
-          case 'L': // LND
-            {
-              precisionLand(current_lat, current_lon, 0.0); // Lądowanie w aktualnych współrzędnych GPS
-            }
-            break;
-          
-          case 'S': // STR
-            {
-              armMotors(true);
-            }
-            break;
+        if (1) { //receivedChecksum == calculatedChecksum
+          convertCommand(cmd);
+          Serial.print("Received command: ");
+          Serial.write(cmd.type, 3);
+          Serial.print(" with parameters: ");
+          Serial.print(cmd.param1);
+          Serial.print(", ");
+          Serial.print(cmd.param2);
+          Serial.print(", ");
+          Serial.println(cmd.param3);
 
-          default:
-            Serial3.print("UNK@");
-            break;
+          switch (cmd.type[0]) {
+            case 'D': // DST
+              if (strncmp(cmd.type, "DST", 3) == 0) {
+                double new_lat, new_lon;
+                convertLocalToGPS(current_lat, current_lon, cmd.param1, cmd.param2, new_lat, new_lon);
+                flyToGPS(new_lat, new_lon, cmd.param3); // Użyj przekonwertowanych współrzędnych GPS
+                
+              }
+              break;
+
+            case 'V': // VEL
+              if (strncmp(cmd.type, "VEL", 3) == 0) {
+                setSpeed(cmd.param1, cmd.param2, cmd.param3);
+              }
+              break;
+
+            case 'R': // ROT
+              if (strncmp(cmd.type, "ROT", 3) == 0) {
+                setYaw(cmd.param1);
+              }
+              break;
+
+            case 'L': // LND
+              if (strncmp(cmd.type, "LND", 3) == 0) {
+                precisionLand(current_lat, current_lon, 0.0); // Lądowanie w aktualnych współrzędnych GPS
+                Serial.println("STR");
+
+              }
+              break;
+
+            case 'S': // STR
+              if (strncmp(cmd.type, "STR", 3) == 0) {
+                armMotors(true);
+                Serial.println("STR");
+              }
+              break;
+
+            default:
+              raspiSerial.print("UNK@");
+              break;
+          }
+
+          // Wysyłanie ACK, aby potwierdzić odebranie komendy
+          raspiSerial.print("ACK@");
+        } else {
+          raspiSerial.print("CHKERR@");
         }
-
-        // Sending ACK to confirm command reception
-        Serial3.print("ACK@");
       } else {
-        Serial3.print("ERR@");
+        raspiSerial.print("ERR@");
       }
 
       // Zresetuj bufor
@@ -539,7 +742,7 @@ float reverseFloat(const float inFloat) {
   returnFloat[3] = floatToConvert[0];
 
   return retVal;
-}
+  }
 
 //######################################################################//
 //                             RESZTA FUNKCJI
@@ -548,6 +751,7 @@ float reverseFloat(const float inFloat) {
 void clearSerialBuffer() {
   while (mavlinkSerial.available() > 0) {
     mavlinkSerial.read();
+    raspiSerial.read();
   }
 }
 
@@ -560,3 +764,34 @@ void convertLocalToGPS(double lat, double lon, double x, double y, double& new_l
   new_lat = lat + (dLat * 180.0 / M_PI);
   new_lon = lon + (dLon * 180.0 / M_PI);
 }
+
+void eulerToQuaternion(float roll, float pitch, float yaw, float quaternion[4]) {
+  float cosRoll = cos(roll * 0.5);
+  float sinRoll = sin(roll * 0.5);
+  float cosPitch = cos(pitch * 0.5);
+  float sinPitch = sin(pitch * 0.5);
+  float cosYaw = cos(yaw * 0.5);
+  float sinYaw = sin(yaw * 0.5);
+
+  quaternion[0] = cosRoll * cosPitch * cosYaw + sinRoll * sinPitch * sinYaw;
+  quaternion[1] = sinRoll * cosPitch * cosYaw - cosRoll * sinPitch * sinYaw;
+  quaternion[2] = cosRoll * sinPitch * cosYaw + sinRoll * cosPitch * sinYaw;
+  quaternion[3] = cosRoll * cosPitch * sinYaw - sinRoll * sinPitch * cosYaw;
+}
+
+double radToDeg(double radians){
+    return radians * (180.0 / PI);
+}
+
+double convertYaw(double angle) {
+    // Normalizacja kąta do zakresu [0, 360)
+    double newAngle = fmod((angle + 360.0), 360.0);
+    if (newAngle < 0) {
+        newAngle += 360.0;
+    }
+    return newAngle;
+}
+
+// TESTOWE KOMENDY DO PORUSZANIA
+
+// 'DST', 0, 0, 5, 0, @
